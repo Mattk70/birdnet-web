@@ -1,0 +1,80 @@
+<html>
+  <head>
+    <title>BirdNet web inference test</title>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-core"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-converter"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-backend-cpu"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-backend-webgl"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-backend-wasm/dist/tf-backend-wasm.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-backend-webgpu/dist/tf-backend-webgpu.js"></script>
+    <style>
+      html, body {
+          font-size: 15px;
+          font-family: 'Courier New', Courier, monospace;
+          background-color: #222;
+          padding: 20px;
+          margin: 0;
+          color: bisque;
+      }
+      .error {
+        color: rgb(224, 99, 99);
+      }
+  </style>
+  </head>
+  <body>
+    <div id="log">Starting<br/></div>
+    <script>
+      async function runBirdNet() {
+        const params = new URL(location).searchParams
+        const debug_mode = params.get('debug_mode') === 'true'
+        await tf.setBackend(params.get('backend') || 'cpu')
+        if (debug_mode) {
+          tf.enableDebugMode()
+        }
+        window.log.innerHTML += `tfjs backend: ${tf.getBackend()}, debug_mode: ${debug_mode ? 'on' : 'off'}<br/>`
+
+        window.log.innerHTML += `Loading birds list... `
+        let start = performance.now()
+        const birds = (await fetch('birds.txt').then(r => r.text())).split('\n')
+        window.log.innerHTML += `${Math.round(performance.now() - start)}ms, ${birds.length} birds [OK]<br/>`
+
+        window.log.innerHTML += `Loading test audio data... `
+        start = performance.now()
+        const wave = await fetch('wave.json').then(r => r.json())
+        const waveT = tf.tensor([wave])
+        window.log.innerHTML += `${Math.round(performance.now() - start)}ms [OK]<br/>`
+
+        window.log.innerHTML += `Loading model... `
+        start = performance.now()
+        const tfModel = await tf.loadGraphModel('birdnet-js/model.json')
+        window.log.innerHTML += `${Math.round(performance.now() - start)}ms [OK]<br/>`
+
+        window.log.innerHTML += `Inference... `
+        await new Promise(resolve => setTimeout(resolve, 0)) // for UI to update before long sync operation
+        start = performance.now()
+        const prediction = tfModel.predict(waveT).dataSync()
+        window.log.innerHTML += `${Math.round(performance.now() - start)}ms [OK]<br/>`
+        
+        const THRESHOLD = 0.1
+        const SIGMOID_SENSITIVITY = 1
+        let guessList = []
+
+        for (let i = 0; i < prediction.length; i++) {    
+            const confidence = 1 / (1 + Math.E ** (-SIGMOID_SENSITIVITY * Math.min(15, Math.max(-15, prediction[i]))))
+            if (confidence > 0.1) {
+                guessList.push({ bird: (birds[i] || '_').split('_')[1], confidence })
+            }
+        }
+        guessList.sort((a, b) => a.confidence - b.confidence)
+        window.log.innerHTML += '<br/>===== RESULT:<br/>'
+        guessList.forEach(({ bird, confidence }) => {
+            window.log.innerHTML += `${bird}, confidence: ${confidence.toFixed(2)}<br/>`
+        })
+      }
+      runBirdNet().catch((e) => {
+        window.log.innerHTML += '<p class="error">' + e.message + '<br/>' + e.stack + '<p/>'
+        throw e
+      })
+    </script>
+  </body>
+</html>
