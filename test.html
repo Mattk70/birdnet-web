@@ -72,7 +72,7 @@
         })
       }
       runBirdNet().catch((e) => {
-        window.log.innerHTML += '<p class="error">' + e.message + '<br/>' + e.stack + '<p/>'
+        window.log.innerHTML += `<p class="error">${e.stack}<p/>`
         throw e
       })
     </script>
