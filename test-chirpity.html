@@ -1,13 +1,7 @@
 <html>
   <head>
     <title>BirdNet web inference test</title>
-    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-core"></script>
-    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-layers"></script>
-    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-converter"></script>
-    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-backend-cpu"></script>
-    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-backend-webgl"></script>
-    <!-- <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-backend-wasm/dist/tf-backend-wasm.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-backend-webgpu/dist/tf-backend-webgpu.js"></script> -->
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@latest"></script>
     <style>
       html, body {
           font-size: 15px;
@@ -23,219 +17,100 @@
   </style>
   </head>
   <body>
-    <div id="log">Starting<br/></div>
+    <button onClick="run()">Test</button>
+    <div id="log"></div>
     <script>
-      /// Birdnet definitions
+      class MelSpecLayerSimple extends tf.layers.Layer {
+          constructor(config) {
+              super(config)
+              this.sampleRate = config.sampleRate
+              this.specShape = config.specShape
+              this.frameStep = config.frameStep
+              this.frameLength = config.frameLength
+              this.melFilterbank = tf.tensor2d(config.melFilterbank)
+          }
+          build(inputShape) {
+              this.magScale = this.addWeight(
+                  'magnitude_scaling',
+                  [],
+                  'float32',
+                  tf.initializers.constant({ value: 1.23 })
+              );
+              super.build(inputShape)
+          }
+          computeOutputShape(inputShape) {
+              return [inputShape[0], this.specShape[0], this.specShape[1], 1];
+          }
+          call(inputs) {
+            return tf.tidy(() => {
+                  inputs = inputs[0];
+                  const inputList = tf.split(inputs, inputs.shape[0])
+                  const specBatch = inputList.map(input =>{
+                      input = input.squeeze();
+                      input = tf.sub(input, tf.min(input, -1, true));
+                      input = tf.div(input, tf.max(input, -1, true).add(0.000001));
+                      input = tf.sub(input, 0.5);
+                      input = tf.mul(input, 2.0);
 
-// Define custom layer for computing mel spectrograms
-class MelSpecLayerSimple extends tf.layers.Layer {
-  constructor(config) {
-    super(config);
+                      let spec = tf.signal.stft(
+                          input,
+                          this.frameLength,
+                          this.frameStep,
+                          this.frameLength,
+                          tf.signal.hannWindow,
+                      )
+                      spec = tf.cast(spec, 'float32')
+                      spec = tf.matMul(spec, this.melFilterbank)
+                      spec = spec.pow(2.0)
+                      spec = spec.pow(tf.div(1.0, tf.add(1.0, tf.exp(this.magScale.read()))))
+                      spec = tf.reverse(spec, -1)
+                      spec = tf.transpose(spec)
+                      spec = spec.expandDims(-1)
+                      return spec;
+                  })
+                  return tf.stack(specBatch)
+              });
+          }
+          static get className() { return 'MelSpecLayerSimple' }
+      }
+      tf.serialization.registerClass(MelSpecLayerSimple);
 
-    // Initialize parameters
-    this.sampleRate = config.sampleRate;
-    this.specShape = config.specShape;
-    this.frameStep = config.frameStep;
-    this.frameLength = config.frameLength;
-    this.fmin = config.fmin;
-    this.fmax = config.fmax;
-    this.melFilterbank = tf.tensor2d(config.melFilterbank);
-  }
-
-  build(inputShape) {
-    // Initialize trainable weights, for example:
-    this.magScale = this.addWeight(
-      "magnitude_scaling",
-      [],
-      "float32",
-      tf.initializers.constant({ value: 1.23 })
-    );
-
-    super.build(inputShape);
-  }
-
-  // Compute the output shape of the layer
-  computeOutputShape(inputShape) {
-    return [inputShape[0], this.specShape[0], this.specShape[1], 1];
-  }
-
-  // Define the layer's forward pass
-  call(inputs) {
-    return tf.tidy(() => {
-      // inputs is a tensor representing the input data
-      inputs = inputs[0];
-      console.log('inputs:', inputs)
-      console.log('inputs.shape[0]:', inputs.shape[0])
-      console.log('inputs.split:', inputs.split)
-      return tf.stack(
-        inputs.split(inputs.shape[0]).map((input) => {
-          input = input.squeeze();
-          // Normalize values between -1 and 1
-          input = tf.sub(input, tf.min(input, -1, true));
-          input = tf.div(input, tf.max(input, -1, true).add(0.000001));
-          input = tf.sub(input, 0.5);
-          input = tf.mul(input, 2.0);
-
-          // Perform STFT and cast result to float
-          let spec = tf.signal
-            .stft(
-              input,
-              this.frameLength,
-              this.frameStep,
-              this.frameLength,
-              tf.signal.hannWindow
-            )
-            .cast("float32");
-
-          // Apply mel filter bank
-          spec = spec
-            .matMul(this.melFilterbank)
-
-            // Convert to power spectrogram
-            .pow(2.0)
-
-            // Apply nonlinearity
-            .pow(tf.div(1.0, tf.add(1.0, tf.exp(this.magScale.read()))))
-
-            // Flip the spectrogram
-            .reverse(-1)
-
-            // Swap axes to fit input shape
-            .transpose()
-
-            // Adding the channel dimension
-            .expandDims(-1);
-
-          return spec;
-        })
-      );
-    });
-  }
-
-  // Optionally, include the `className` method to provide a machine-readable name for the layer
-  static get className() {
-    return "MelSpecLayerSimple";
-  }
-}
-
-// Register the custom layer with TensorFlow.js
-tf.serialization.registerClass(MelSpecLayerSimple);
-
-/////////////////////////  Build GlobalExpPool2D Layer  /////////////////////////
-// function logmeanexp(x, axis, keepdims, sharpness) {
-//     const xmax = tf.max(x, axis, true);
-//     const xmax2 = tf.max(x, axis, keepdims);
-//     x = tf.mul(sharpness, tf.sub(x, xmax));
-//     let y = tf.log(tf.mean(tf.exp(x), axis, keepdims));
-//     y = tf.add(tf.div(y, sharpness), xmax2);
-//     return y
-// }
-function logmeanexp(x, axis, keepdims, sharpness) {
-  return tf.add(
-    tf.div(
-      tf.log(
-        tf.mean(
-          tf.exp(x.mul(sharpness, x.sub(tf.max(x, axis, true)))),
-          axis,
-          keepdims
-        )
-      ),
-      sharpness
-    ),
-    tf.max(x, axis, keepdims)
-  );
-}
-class GlobalLogExpPooling2D extends tf.layers.Layer {
-  constructor(config) {
-    super(config);
-  }
-
-  build(inputShape) {
-    this.sharpness = this.addWeight(
-      "sharpness",
-      [1],
-      "float32",
-      tf.initializers.constant({ value: 2 })
-    );
-  }
-
-  computeOutputShape(inputShape) {
-    return [inputShape[0], inputShape[3]];
-  }
-
-  call(input, kwargs) {
-    return logmeanexp(input[0], [1, 2], false, this.sharpness.read()); //.read().dataSync()[0]);
-  }
-
-  static get className() {
-    return "GlobalLogExpPooling2D";
-  }
-}
-
-tf.serialization.registerClass(GlobalLogExpPooling2D);
-
-/////////////////////////  Build Sigmoid Layer  /////////////////////////
-class SigmoidLayer extends tf.layers.Layer {
-  constructor(config) {
-    super(config);
-    this.config = config;
-  }
-
-  build(inputShape) {
-    this.kernel = this.addWeight(
-      "scale_factor",
-      [1],
-      "float32",
-      tf.initializers.constant({ value: 1 })
-    );
-  }
-
-  computeOutputShape(inputShape) {
-    return inputShape;
-  }
-
-  call(input, kwargs) {
-    // Since sigmoid is always 1, we simplify here
-    //return tf.sigmoid(tf.mul(input[0], CONFIG.sigmoid))
-    return tf.sigmoid(input[0]);
-  }
-
-  static get className() {
-    return "SigmoidLayer";
-  }
-}
-
-tf.serialization.registerClass(SigmoidLayer);
+      window.wave = null
+      window.tfModel = null
+      window.birds = null
       async function runBirdNet() {
-        const params = new URL(location).searchParams
-        const debug_mode = params.get('debug_mode') === 'true'
-        await tf.setBackend(params.get('backend') || 'cpu')
-        if (debug_mode) {
-          tf.enableDebugMode()
+        if (!window.wave || !window.tfModel || !window.birds) {
+          const params = new URL(location).searchParams
+          const debug_mode = params.get('debug_mode') === 'true'
+          await tf.setBackend(params.get('backend') || 'cpu')
+          if (debug_mode) {
+            tf.enableDebugMode()
+          }
+          window.log.innerHTML += `tfjs backend: ${tf.getBackend()}, debug_mode: ${debug_mode ? 'on' : 'off'}<br/>`
+
+          window.log.innerHTML += `Loading birds list... `
+          let start = performance.now()
+          window.birds = (await fetch('birds.txt').then(r => r.text())).split('\n')
+          window.log.innerHTML += `${Math.round(performance.now() - start)}ms, ${birds.length} birds [OK]<br/>`
+
+          window.log.innerHTML += `Loading test audio data... `
+          start = performance.now()
+          window.wave = await fetch('wave.json').then(r => r.json())
+          window.log.innerHTML += `${Math.round(performance.now() - start)}ms [OK]<br/>`
+
+          window.log.innerHTML += `Loading model... `
+          start = performance.now()
+          window.tfModel = await tf.loadLayersModel('models/birdnet-js-chirpity/model.json', {
+              weightPathPrefix: 'models/birdnet-js-chirpity/',
+          })
+          window.log.innerHTML += `${Math.round(performance.now() - start)}ms [OK]<br/>`
         }
-        window.log.innerHTML += `tfjs backend: ${tf.getBackend()}, debug_mode: ${debug_mode ? 'on' : 'off'}<br/>`
-
-        window.log.innerHTML += `Loading birds list... `
-        let start = performance.now()
-        const birds = (await fetch('birds.txt').then(r => r.text())).split('\n')
-        window.log.innerHTML += `${Math.round(performance.now() - start)}ms, ${birds.length} birds [OK]<br/>`
-
-        window.log.innerHTML += `Loading test audio data... `
-        start = performance.now()
-        const wave = await fetch('wave.json').then(r => r.json())
-        window.log.innerHTML += `${Math.round(performance.now() - start)}ms [OK]<br/>`
-
-        window.log.innerHTML += `Loading model... `
-        start = performance.now()
-        const tfModel = await tf.loadLayersModel('models/birdnet-js-chirpity/model.json', {
-            weightPathPrefix: 'models/birdnet-js-chirpity/',
-        })
-        window.log.innerHTML += `${Math.round(performance.now() - start)}ms [OK]<br/>`
-
         window.log.innerHTML += `Inference... `
-        await new Promise(resolve => setTimeout(resolve, 0)) // for UI to update before long sync operation
+        await new Promise(resolve => setTimeout(resolve, 50)) // for UI to update before long sync operation
         start = performance.now()
-        const prediction = tfModel.predict(tf.tensor([wave]), { batchSize: 1 }).dataSync()
+        tf.engine().startScope()
+        const prediction = await tfModel.predict(tf.tensor([wave]), { batchSize: 1 }).data()
+        tf.engine().endScope()
         window.log.innerHTML += `${Math.round(performance.now() - start)}ms [OK]<br/>`
         
         const THRESHOLD = 0.1
@@ -243,7 +118,7 @@ tf.serialization.registerClass(SigmoidLayer);
         let guessList = []
 
         for (let i = 0; i < prediction.length; i++) {    
-            const confidence = 1 / (1 + Math.E ** (-SIGMOID_SENSITIVITY * Math.min(15, Math.max(-15, prediction[i]))))
+            const confidence = prediction[i] // 1 / (1 + Math.E ** (-SIGMOID_SENSITIVITY * Math.min(15, Math.max(-15, prediction[i]))))
             if (confidence > 0.1) {
                 guessList.push({ bird: (birds[i] || '_').split('_')[1], confidence })
             }
@@ -254,10 +129,12 @@ tf.serialization.registerClass(SigmoidLayer);
             window.log.innerHTML += `${bird}, confidence: ${confidence.toFixed(2)}<br/>`
         })
       }
-      runBirdNet().catch((e) => {
-        window.log.innerHTML += `<p class="error">${e.stack}<p/>`
-        throw e
-      })
+      function run() {
+        runBirdNet().catch((e) => {
+          window.log.innerHTML += `<p class="error">${e.stack}<p/>`
+          throw e
+        })
+      }
     </script>
   </body>
 </html>
