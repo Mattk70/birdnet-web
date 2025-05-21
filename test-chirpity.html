@@ -1,5 +1,6 @@
 <html>
   <head>
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>BirdNet web inference test</title>
     <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@latest"></script>
     <style>
@@ -7,7 +8,7 @@
           font-size: 15px;
           font-family: 'Courier New', Courier, monospace;
           background-color: #222;
-          padding: 20px;
+          padding: 10px;
           margin: 0;
           color: bisque;
       }
@@ -79,15 +80,14 @@
       window.tfModel = null
       window.birds = null
       async function runBirdNet() {
+        const params = new URL(location).searchParams
+        const debug_mode = params.get('debug_mode') === 'true'
+        await tf.setBackend(params.get('backend') || 'cpu')
+        if (debug_mode) {
+          tf.enableDebugMode()
+        }
+        window.log.innerHTML = `tfjs backend: ${tf.getBackend()}, debug_mode: ${debug_mode ? 'on' : 'off'}<br/>`
         if (!window.wave || !window.tfModel || !window.birds) {
-          const params = new URL(location).searchParams
-          const debug_mode = params.get('debug_mode') === 'true'
-          await tf.setBackend(params.get('backend') || 'cpu')
-          if (debug_mode) {
-            tf.enableDebugMode()
-          }
-          window.log.innerHTML += `tfjs backend: ${tf.getBackend()}, debug_mode: ${debug_mode ? 'on' : 'off'}<br/>`
-
           window.log.innerHTML += `Loading birds list... `
           let start = performance.now()
           window.birds = (await fetch('birds.txt').then(r => r.text())).split('\n')
@@ -109,9 +109,21 @@
         await new Promise(resolve => setTimeout(resolve, 50)) // for UI to update before long sync operation
         start = performance.now()
         tf.engine().startScope()
-        const prediction = await tfModel.predict(tf.tensor([wave]), { batchSize: 1 }).data()
+        let prediction = null
+        const profile_info = await tf.profile(() => {
+          prediction = tfModel.predict(tf.tensor([wave]), { batchSize: 1 }).dataSync()
+        })
         tf.engine().endScope()
-        window.log.innerHTML += `${Math.round(performance.now() - start)}ms [OK]<br/>`
+        profile_info.kernels.sort((a, b) => b.kernelTimeMs - a.kernelTimeMs)
+        let totalKernelsTime = 0
+        profile_info.kernels.forEach(k => { totalKernelsTime += k.kernelTimeMs })
+        console.log('profile_info:', profile_info)
+        window.log.innerHTML += `${Math.round(performance.now() - start)}ms, kernel time: ${Math.round(totalKernelsTime)}ms [OK]<br/>`
+        for (let kernel of profile_info.kernels.slice(0, 40)) {
+          if (kernel.kernelTimeMs < 1) { break }
+          window.log.innerHTML += `${kernel.name.padEnd(20, '.')} ${Math.round(kernel.kernelTimeMs)}ms<br/>`
+        }
+        
         
         const THRESHOLD = 0.1
         const SIGMOID_SENSITIVITY = 1
