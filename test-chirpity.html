@@ -21,6 +21,83 @@
     <button onClick="run()">Test</button>
     <div id="log"></div>
     <script>
+      function FFTProgram(component, inputShape) {
+        return {
+          variableNames: ['real', 'imag'],
+          outputShape: inputShape,
+          userCode: `
+            void main() {
+              ivec2 coords = getOutputCoords();
+              int batch = coords[0];
+              float exponentMultiplierTimesIndexRatio = -2.0 * ${Math.PI} * float(coords[1]) / float(${inputShape[1]});
+              float result = 0.0;
+              for (int i = 0; i < ${inputShape[1]}; i++) {
+                float x = exponentMultiplierTimesIndexRatio * float(i);
+                result += getReal(batch, i) * ${component === 'real' ? 'cos(x)' : 'sin(x)'};
+              }
+              setOutput(result);
+            }`
+        }
+      }
+      tf.registerKernel({
+        kernelName: 'FFT2',
+        backendName: 'webgl',
+        kernelFunc: ({ backend, inputs: { input: x } }) => {
+          const xData = backend.texData.get(x.dataId)
+          const inputSize = tf.util.sizeFromShape(x.shape)
+          const innerDimensionSize = x.shape[x.shape.length - 1]
+          const batch = inputSize / innerDimensionSize
+          const input2D = tf.reshape(x, [batch, innerDimensionSize])
+          const xShape = input2D.shape
+          const realProgram = FFTProgram('real', xShape)
+          const imagProgram = FFTProgram('imag', xShape)
+          const inputs = [
+            {
+              dataId: xData.complexTensorInfos.real.dataId,
+              dtype: xData.complexTensorInfos.real.dtype,
+              shape: xShape
+            },
+            {
+              dataId: xData.complexTensorInfos.imag.dataId,
+              dtype: xData.complexTensorInfos.imag.dtype,
+              shape: xShape
+            }
+          ]
+          const realPart = backend.runWebGLProgram(realProgram, inputs, 'float32')
+          const imagPart = backend.runWebGLProgram(imagProgram, inputs, 'float32')
+          const complexOutput = tf.engine().runKernel('Complex', { real: realPart, imag: imagPart })
+          backend.disposeIntermediateTensorInfo(realPart)
+          backend.disposeIntermediateTensorInfo(imagPart)
+          const complexOutputReshaped = tf.engine().runKernel('Reshape', { x: complexOutput }, { shape: x.shape })
+          backend.disposeIntermediateTensorInfo(input2D)
+          backend.disposeIntermediateTensorInfo(complexOutput)
+          return complexOutputReshaped
+        }
+      })
+      function stft(signal, frameLength, frameStep, fftLength, windowFn) {
+        const framedSignal = tf.signal.frame(signal, frameLength, frameStep)
+        const input = tf.mul(framedSignal, windowFn(frameLength))
+        if (!window.useFastFFT) {
+          return tf.spectral.rfft(input, fftLength)
+        }
+        let innerDimensionSize = input.shape[input.shape.length - 1]
+        const batch = input.size / innerDimensionSize
+        const zerosInput = tf.zerosLike(input)
+        const complexInput = tf.reshape(tf.complex(input, zerosInput), [batch, innerDimensionSize])
+        const ret = tf.engine().runKernel('FFT2', {input: complexInput})
+        const half = Math.floor(innerDimensionSize / 2) + 1
+        const realValues = tf.real(ret)
+        const imagValues = tf.imag(ret)
+        const realComplexConjugate = tf.split(
+            realValues, [half, innerDimensionSize - half],
+            realValues.shape.length - 1)
+        const imagComplexConjugate = tf.split(
+            imagValues, [half, innerDimensionSize - half],
+            imagValues.shape.length - 1)
+        const outputShape = input.shape.slice()
+        outputShape[input.shape.length - 1] = half
+        return tf.reshape(tf.complex(realComplexConjugate[0], imagComplexConjugate[0]), outputShape)
+      }
       class MelSpecLayerSimple extends tf.layers.Layer {
           constructor(config) {
               super(config)
@@ -53,7 +130,7 @@
                       input = tf.sub(input, 0.5);
                       input = tf.mul(input, 2.0);
 
-                      let spec = tf.signal.stft(
+                      let spec = stft(
                           input,
                           this.frameLength,
                           this.frameStep,
@@ -79,14 +156,14 @@
       window.wave = null
       window.tfModel = null
       window.birds = null
+      window.useFastFFT = false
       async function runBirdNet() {
+        await tf.ready()
         const params = new URL(location).searchParams
-        const debug_mode = params.get('debug_mode') === 'true'
+        const profile = params.get('profile') === 'on'
+        window.useFastFFT = params.get('fast_fft') === 'on'
         await tf.setBackend(params.get('backend') || 'cpu')
-        if (debug_mode) {
-          tf.enableDebugMode()
-        }
-        window.log.innerHTML = `tfjs backend: ${tf.getBackend()}, debug_mode: ${debug_mode ? 'on' : 'off'}<br/>`
+        window.log.innerHTML = `tfjs backend: ${tf.getBackend()}, profile: ${profile ? 'on' : 'off'}, fast_fft: ${window.useFastFFT ? 'on' : 'off'}<br/>`
         if (!window.wave || !window.tfModel || !window.birds) {
           window.log.innerHTML += `Loading birds list... `
           let start = performance.now()
@@ -110,18 +187,23 @@
         start = performance.now()
         tf.engine().startScope()
         let prediction = null
-        const profile_info = await tf.profile(() => {
-          prediction = tfModel.predict(tf.tensor([wave]), { batchSize: 1 }).dataSync()
-        })
-        tf.engine().endScope()
-        profile_info.kernels.sort((a, b) => b.kernelTimeMs - a.kernelTimeMs)
-        let totalKernelsTime = 0
-        profile_info.kernels.forEach(k => { totalKernelsTime += k.kernelTimeMs })
-        console.log('profile_info:', profile_info)
-        window.log.innerHTML += `${Math.round(performance.now() - start)}ms, kernel time: ${Math.round(totalKernelsTime)}ms [OK]<br/>`
-        for (let kernel of profile_info.kernels.slice(0, 40)) {
-          if (kernel.kernelTimeMs < 1) { break }
-          window.log.innerHTML += `${kernel.name.padEnd(20, '.')} ${Math.round(kernel.kernelTimeMs)}ms<br/>`
+        if (profile) {
+          const profile_info = await tf.profile(async () => {
+            prediction = await tfModel.predict(tf.tensor([wave]), { batchSize: 1 }).data()
+          })
+          tf.engine().endScope()
+          profile_info.kernels.sort((a, b) => b.kernelTimeMs - a.kernelTimeMs)
+          let totalKernelsTime = 0
+          profile_info.kernels.forEach(k => { totalKernelsTime += k.kernelTimeMs })
+          console.log('profile_info:', profile_info)
+          window.log.innerHTML += `${Math.round(performance.now() - start)}ms, kernel time: ${Math.round(totalKernelsTime)}ms [OK]<br/>`
+          for (let kernel of profile_info.kernels.slice(0, 40)) {
+            if (kernel.kernelTimeMs < 1) { break }
+            window.log.innerHTML += `${kernel.name.padEnd(20, '.')} ${Math.round(kernel.kernelTimeMs)}ms<br/>`
+          }
+        } else {
+          prediction = await tfModel.predict(tf.tensor([wave]), { batchSize: 1 }).data()
+          window.log.innerHTML += `${Math.round(performance.now() - start)}ms [OK]<br/>`
         }
         
         
