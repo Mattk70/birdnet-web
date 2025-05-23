@@ -21,82 +21,46 @@
     <button onClick="run()">Test</button>
     <div id="log"></div>
     <script>
-      function FFTProgram(component, inputShape) {
-        return {
-          variableNames: ['real', 'imag'],
-          outputShape: inputShape,
-          userCode: `
-            void main() {
-              ivec2 coords = getOutputCoords();
-              int batch = coords[0];
-              float exponentMultiplierTimesIndexRatio = -2.0 * ${Math.PI} * float(coords[1]) / float(${inputShape[1]});
-              float result = 0.0;
-              for (int i = 0; i < ${inputShape[1]}; i++) {
-                float x = exponentMultiplierTimesIndexRatio * float(i);
-                result += getReal(batch, i) * ${component === 'real' ? 'cos(x)' : 'sin(x)'};
-              }
-              setOutput(result);
-            }`
-        }
-      }
       tf.registerKernel({
         kernelName: 'FFT2',
         backendName: 'webgl',
         kernelFunc: ({ backend, inputs: { input: x } }) => {
-          const xData = backend.texData.get(x.dataId)
-          const inputSize = tf.util.sizeFromShape(x.shape)
           const innerDimensionSize = x.shape[x.shape.length - 1]
-          const batch = inputSize / innerDimensionSize
-          const input2D = tf.reshape(x, [batch, innerDimensionSize])
-          const xShape = input2D.shape
-          const realProgram = FFTProgram('real', xShape)
-          const imagProgram = FFTProgram('imag', xShape)
-          const inputs = [
-            {
-              dataId: xData.complexTensorInfos.real.dataId,
-              dtype: xData.complexTensorInfos.real.dtype,
-              shape: xShape
-            },
-            {
-              dataId: xData.complexTensorInfos.imag.dataId,
-              dtype: xData.complexTensorInfos.imag.dtype,
-              shape: xShape
-            }
-          ]
-          const realPart = backend.runWebGLProgram(realProgram, inputs, 'float32')
-          const imagPart = backend.runWebGLProgram(imagProgram, inputs, 'float32')
-          const complexOutput = tf.engine().runKernel('Complex', { real: realPart, imag: imagPart })
+          const batch = tf.util.sizeFromShape(x.shape) / innerDimensionSize
+          const realPart = backend.runWebGLProgram({
+            variableNames: ['real'],
+            outputShape: [batch, innerDimensionSize],
+            userCode: `
+              void main() {
+                ivec2 coords = getOutputCoords();
+                int batch = coords[0];
+                float exponentMultiplierTimesIndexRatio = -2.0 * ${Math.PI} * float(coords[1]) / float(${innerDimensionSize});
+                float result = 0.0;
+                for (int i = 0; i < ${innerDimensionSize}; i++) {
+                  float x = exponentMultiplierTimesIndexRatio * float(i);
+                  result += getReal(batch, i) * cos(x);
+                }
+                setOutput(result);
+              }`
+          }, [{ dataId: x.dataId, dtype: x.dtype, shape: [batch, innerDimensionSize]}], 'float32')
+          const res = tf.engine().runKernel('Reshape', { x: realPart }, { shape: x.shape })
           backend.disposeIntermediateTensorInfo(realPart)
-          backend.disposeIntermediateTensorInfo(imagPart)
-          const complexOutputReshaped = tf.engine().runKernel('Reshape', { x: complexOutput }, { shape: x.shape })
-          backend.disposeIntermediateTensorInfo(input2D)
-          backend.disposeIntermediateTensorInfo(complexOutput)
-          return complexOutputReshaped
+          return res
         }
       })
       function stft(signal, frameLength, frameStep, fftLength, windowFn) {
         const framedSignal = tf.signal.frame(signal, frameLength, frameStep)
         const input = tf.mul(framedSignal, windowFn(frameLength))
-        if (!window.useFastFFT) {
-          return tf.spectral.rfft(input, fftLength)
-        }
         let innerDimensionSize = input.shape[input.shape.length - 1]
         const batch = input.size / innerDimensionSize
-        const zerosInput = tf.zerosLike(input)
-        const complexInput = tf.reshape(tf.complex(input, zerosInput), [batch, innerDimensionSize])
-        const ret = tf.engine().runKernel('FFT2', {input: complexInput})
+        const realValues = tf.engine().runKernel('FFT2', {input: tf.reshape(input, [batch, innerDimensionSize])})
         const half = Math.floor(innerDimensionSize / 2) + 1
-        const realValues = tf.real(ret)
-        const imagValues = tf.imag(ret)
         const realComplexConjugate = tf.split(
             realValues, [half, innerDimensionSize - half],
             realValues.shape.length - 1)
-        const imagComplexConjugate = tf.split(
-            imagValues, [half, innerDimensionSize - half],
-            imagValues.shape.length - 1)
         const outputShape = input.shape.slice()
         outputShape[input.shape.length - 1] = half
-        return tf.reshape(tf.complex(realComplexConjugate[0], imagComplexConjugate[0]), outputShape)
+        return tf.reshape(realComplexConjugate[0], outputShape)
       }
       class MelSpecLayerSimple extends tf.layers.Layer {
           constructor(config) {
@@ -130,14 +94,25 @@
                       input = tf.sub(input, 0.5);
                       input = tf.mul(input, 2.0);
 
-                      let spec = stft(
+                      let spec;
+                      if (window.useFastFFT) {
+                        spec = stft(
                           input,
                           this.frameLength,
                           this.frameStep,
                           this.frameLength,
                           tf.signal.hannWindow,
-                      )
-                      spec = tf.cast(spec, 'float32')
+                        )
+                      } else {
+                        spec = tf.signal.stft(
+                            input,
+                            this.frameLength,
+                            this.frameStep,
+                            this.frameLength,
+                            tf.signal.hannWindow,
+                        )
+                        spec = tf.cast(spec, 'float32')
+                      }
                       spec = tf.matMul(spec, this.melFilterbank)
                       spec = spec.pow(2.0)
                       spec = spec.pow(tf.div(1.0, tf.add(1.0, tf.exp(this.magScale.read()))))
