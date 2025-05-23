@@ -25,24 +25,24 @@
         kernelName: 'FFT2',
         backendName: 'webgl',
         kernelFunc: ({ backend, inputs: { input: x } }) => {
-          const innerDimensionSize = x.shape[x.shape.length - 1]
-          const batch = tf.util.sizeFromShape(x.shape) / innerDimensionSize
+          const innderDim = x.shape[x.shape.length - 1]
+          const batch = tf.util.sizeFromShape(x.shape) / innderDim
           const realPart = backend.runWebGLProgram({
             variableNames: ['real'],
-            outputShape: [batch, innerDimensionSize],
+            outputShape: [batch, innderDim],
             userCode: `
               void main() {
                 ivec2 coords = getOutputCoords();
                 int batch = coords[0];
-                float exponentMultiplierTimesIndexRatio = -2.0 * ${Math.PI} * float(coords[1]) / float(${innerDimensionSize});
+                float multiplier = -2.0 * ${Math.PI} * float(coords[1]) / float(${innderDim});
                 float result = 0.0;
-                for (int i = 0; i < ${innerDimensionSize}; i++) {
-                  float x = exponentMultiplierTimesIndexRatio * float(i);
+                for (int i = 0; i < ${innderDim}; i++) {
+                  float x = multiplier * float(i);
                   result += getReal(batch, i) * cos(x);
                 }
                 setOutput(result);
               }`
-          }, [{ dataId: x.dataId, dtype: x.dtype, shape: [batch, innerDimensionSize]}], 'float32')
+          }, [{ dataId: x.dataId, dtype: x.dtype, shape: [batch, innderDim]}], 'float32')
           const res = tf.engine().runKernel('Reshape', { x: realPart }, { shape: x.shape })
           backend.disposeIntermediateTensorInfo(realPart)
           return res
@@ -51,12 +51,12 @@
       function stft(signal, frameLength, frameStep, fftLength, windowFn) {
         const framedSignal = tf.signal.frame(signal, frameLength, frameStep)
         const input = tf.mul(framedSignal, windowFn(frameLength))
-        let innerDimensionSize = input.shape[input.shape.length - 1]
-        const batch = input.size / innerDimensionSize
-        const realValues = tf.engine().runKernel('FFT2', {input: tf.reshape(input, [batch, innerDimensionSize])})
-        const half = Math.floor(innerDimensionSize / 2) + 1
+        let innerDim = input.shape[input.shape.length - 1]
+        const batch = input.size / innerDim
+        const realValues = tf.engine().runKernel('FFT2', {input: tf.reshape(input, [batch, innerDim])})
+        const half = Math.floor(innerDim / 2) + 1
         const realComplexConjugate = tf.split(
-            realValues, [half, innerDimensionSize - half],
+            realValues, [half, innerDim - half],
             realValues.shape.length - 1)
         const outputShape = input.shape.slice()
         outputShape[input.shape.length - 1] = half
