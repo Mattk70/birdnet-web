@@ -3,6 +3,8 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>BirdNet web inference test</title>
     <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@latest"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-backend-wasm/dist/tf-backend-wasm.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-backend-webgpu/dist/tf-backend-webgpu.js"></script>
     <style>
       html, body {
           font-size: 15px;
@@ -45,6 +47,50 @@
           }, [{ dataId: x.dataId, dtype: x.dtype, shape: [batch, innderDim]}], 'float32')
           const res = tf.engine().runKernel('Reshape', { x: realPart }, { shape: x.shape })
           backend.disposeIntermediateTensorInfo(realPart)
+          return res
+        }
+      })
+      function arrayProduct (arr) {
+        let product = 1;
+        for (let i = 0; i < arr.length; i++) { product *= arr[i] }
+        return product;
+      }
+      function flatDispatchLayout(shape) { return {x: shape.map((d, i) => i)} }
+      function computeDispatch(layout, outputShape, workgroupSize = [1, 1, 1], elementsPerThread = [1, 1, 1]) {
+        return [Math.ceil(arrayProduct(layout.x.map(d => outputShape[d])) /(workgroupSize[0] * elementsPerThread[0])),
+          layout.y ? Math.ceil(arrayProduct(layout.y.map(d => outputShape[d])) / (workgroupSize[1] * elementsPerThread[1])) : 1,
+          layout.z ? Math.ceil(arrayProduct(layout.z.map(d => outputShape[d])) / (workgroupSize[2] * elementsPerThread[2])) : 1]
+      }
+      tf.registerKernel({
+        kernelName: 'FFT2',
+        backendName: 'webgpu',
+        kernelFunc: ({ backend, inputs: { input: x } }) => {
+          const innderDim = x.shape[x.shape.length - 1]
+          const batch = tf.util.sizeFromShape(x.shape) / innderDim
+          const workgroupSize = [64, 1, 1]
+          const realPart = backend.runWebGPUProgram({
+            workgroupSize,
+            variableNames: ['real'],
+            outputShape: [batch, innderDim],
+            size: true,
+            dispatchLayout: flatDispatchLayout([batch, innderDim]),
+            dispatch: computeDispatch(flatDispatchLayout([batch, innderDim]), [batch, innderDim], workgroupSize),
+            getUserCode: () => `
+              fn main(index : i32) {
+                let coords = getOutputCoords();
+                let batch = coords[0];
+                let items = uniforms.realShape[1];
+                let multiplier = -2.0 * ${Math.PI} * f32(coords[1]) / f32(items);
+                var result = 0.0;
+                for (var i = 0; i < items; i++) {
+                  let x = multiplier * f32(i);
+                  result += getReal(batch, i) * cos(x);
+                }
+                setOutputAtIndex(index, result);
+              }`
+          }, [{ dataId: x.dataId, dtype: x.dtype, shape: [batch, innderDim]}], 'float32')
+          const res = tf.engine().runKernel('Reshape', { x: realPart }, { shape: x.shape })
+          backend.disposeData(realPart.dataId)
           return res
         }
       })
