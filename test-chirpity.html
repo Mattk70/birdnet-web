@@ -30,7 +30,7 @@
           const innderDim = x.shape[x.shape.length - 1]
           const batch = tf.util.sizeFromShape(x.shape) / innderDim
           const realPart = backend.runWebGLProgram({
-            variableNames: ['real'],
+            variableNames: ['value'],
             outputShape: [batch, innderDim],
             userCode: `
               void main() {
@@ -40,7 +40,7 @@
                 float result = 0.0;
                 for (int i = 0; i < ${innderDim}; i++) {
                   float x = multiplier * float(i);
-                  result += getReal(batch, i) * cos(x);
+                  result += getValue(batch, i) * cos(x);
                 }
                 setOutput(result);
               }`
@@ -70,7 +70,7 @@
           const workgroupSize = [64, 1, 1]
           const realPart = backend.runWebGPUProgram({
             workgroupSize,
-            variableNames: ['real'],
+            variableNames: ['value'],
             outputShape: [batch, innderDim],
             size: true,
             dispatchLayout: flatDispatchLayout([batch, innderDim]),
@@ -84,7 +84,7 @@
                 var result = 0.0;
                 for (var i = 0; i < items; i++) {
                   let x = multiplier * f32(i);
-                  result += getReal(batch, i) * cos(x);
+                  result += getValue(batch, i) * cos(x);
                 }
                 setOutputAtIndex(index, result);
               }`
@@ -193,7 +193,7 @@
 
           window.log.innerHTML += `Loading test audio data... `
           start = performance.now()
-          window.wave = await fetch('wave.json').then(r => r.json())
+          window.wave = tf.tensor([await fetch('wave.json').then(r => r.json())])
           window.log.innerHTML += `${Math.round(performance.now() - start)}ms [OK]<br/>`
 
           window.log.innerHTML += `Loading model... `
@@ -202,15 +202,22 @@
               weightPathPrefix: 'models/birdnet-js-chirpity/',
           })
           window.log.innerHTML += `${Math.round(performance.now() - start)}ms [OK]<br/>`
+          window.log.innerHTML += `Warm up... `
+          await new Promise(resolve => setTimeout(resolve, 50)) // for UI to update before long sync operation
+          start = performance.now()
+          tf.engine().startScope()
+          await tfModel.predict(tf.zeros(wave.shape)).data()
+          tf.engine().endScope()
+          window.log.innerHTML += `${Math.round(performance.now() - start)}ms [OK]<br/>`
         }
         window.log.innerHTML += `Inference... `
         await new Promise(resolve => setTimeout(resolve, 50)) // for UI to update before long sync operation
         start = performance.now()
-        tf.engine().startScope()
         let prediction = null
         if (profile) {
+          tf.engine().startScope()
           const profile_info = await tf.profile(async () => {
-            prediction = await tfModel.predict(tf.tensor([wave]), { batchSize: 1 }).data()
+            prediction = await tfModel.predict(wave).data()
           })
           tf.engine().endScope()
           profile_info.kernels.sort((a, b) => b.kernelTimeMs - a.kernelTimeMs)
@@ -223,7 +230,9 @@
             window.log.innerHTML += `${kernel.name.padEnd(20, '.')} ${Math.round(kernel.kernelTimeMs)}ms<br/>`
           }
         } else {
-          prediction = await tfModel.predict(tf.tensor([wave]), { batchSize: 1 }).data()
+          tf.engine().startScope()
+          prediction = await tfModel.predict(wave).data()
+          tf.engine().endScope()
           window.log.innerHTML += `${Math.round(performance.now() - start)}ms [OK]<br/>`
         }
         
