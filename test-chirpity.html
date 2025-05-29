@@ -23,33 +23,66 @@
     <button onClick="run()">Test</button>
     <div id="log"></div>
     <script>
+      function bitReverse(num, bits) {
+          let reversed = 0;
+          for (let i = 0; i < bits; i++) {
+              if ((num & (1 << i))) {
+                  reversed |= (1 << (bits - 1 - i));
+              }
+          }
+          return reversed;
+      }
       tf.registerKernel({
-        kernelName: 'FFT2',
-        backendName: 'webgl',
-        kernelFunc: ({ backend, inputs: { input: x } }) => {
-          const innderDim = x.shape[x.shape.length - 1]
-          const batch = tf.util.sizeFromShape(x.shape) / innderDim
-          const realPart = backend.runWebGLProgram({
-            variableNames: ['value'],
-            outputShape: [batch, innderDim],
+    kernelName: 'FFT2',
+    backendName: 'webgl',
+    kernelFunc: ({ backend, inputs: { input } }) => {
+        const innderDim = input.shape[input.shape.length - 1]
+        const batch = tf.util.sizeFromShape(input.shape) / innderDim
+        const reorderMap = new Array(innderDim).fill(0).map((_, i) => bitReverse(i, Math.log2(innderDim)))
+        let currentTensor = backend.runWebGLProgram({
+            variableNames: ['mapvalue'],
+            outputShape: [batch, innderDim * 2],
             userCode: `
-              void main() {
-                ivec2 coords = getOutputCoords();
-                int batch = coords[0];
-                float multiplier = -2.0 * ${Math.PI} * float(coords[1]) / float(${innderDim});
-                float result = 0.0;
-                for (int i = 0; i < ${innderDim}; i++) {
-                  float x = multiplier * float(i);
-                  result += getValue(batch, i) * cos(x);
-                }
-                setOutput(result);
-              }`
-          }, [{ dataId: x.dataId, dtype: x.dtype, shape: [batch, innderDim]}], 'float32')
-          const res = tf.engine().runKernel('Reshape', { x: realPart }, { shape: x.shape })
-          backend.disposeIntermediateTensorInfo(realPart)
-          return res
+int reorderMap[${innderDim}] = int[](${reorderMap.join(', ')});
+void main() {
+  ivec2 coords = getOutputCoords();
+  int batch = coords[0];
+  int k = reorderMap[coords[1] % ${innderDim}];
+  float result = coords[1] < ${innderDim} ? getMapvalue(batch, k) : 0.0;
+  setOutput(result);
+}`
+        }, [input], 'float32')
+        for (let len = 1; len < innderDim; len *= 2) {
+            let prevTensor = currentTensor
+            currentTensor = backend.runWebGLProgram({
+                variableNames: [`value_${len}`],
+                outputShape: [batch, len*2 >= innderDim ? innderDim : innderDim * 2],
+                userCode: `void main() {
+ivec2 coords = getOutputCoords();
+int batch = coords[0];
+int i = coords[1];
+int k = i % ${innderDim};
+int isHigh = (k % ${len * 2}) / ${len};
+int isImag = i / ${innderDim};
+int isReal = 1 - isImag;
+int highSign = (1 - isHigh * 2);
+int baseIndex = k - isHigh * ${len};
+float t = ${Math.PI / len} * float(k % ${len});
+float a = cos(t);
+float b = sin(-t);
+float evenK_re = getValue_${len}(batch, baseIndex);
+float oddK_re = getValue_${len}(batch, baseIndex + ${len});
+float evenK_im = getValue_${len}(batch, baseIndex + ${innderDim});
+float oddK_im = getValue_${len}(batch, baseIndex + ${len + innderDim});
+float outp = (evenK_im + (oddK_re * b + oddK_im * a) * float(highSign)) * float(isImag)
++ (evenK_re + (oddK_re * a - oddK_im * b) * float(highSign)) * float(isReal);
+setOutput(outp);
+}` }, [currentTensor], 'float32')
+            backend.disposeIntermediateTensorInfo(prevTensor)
         }
-      })
+        return currentTensor
+    }
+})
       function arrayProduct (arr) {
         let product = 1;
         for (let i = 0; i < arr.length; i++) { product *= arr[i] }
