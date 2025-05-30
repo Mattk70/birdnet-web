@@ -94,39 +94,81 @@ setOutput(outp);
           layout.y ? Math.ceil(arrayProduct(layout.y.map(d => outputShape[d])) / (workgroupSize[1] * elementsPerThread[1])) : 1,
           layout.z ? Math.ceil(arrayProduct(layout.z.map(d => outputShape[d])) / (workgroupSize[2] * elementsPerThread[2])) : 1]
       }
-      tf.registerKernel({
-        kernelName: 'FFT2',
-        backendName: 'webgpu',
-        kernelFunc: ({ backend, inputs: { input: x } }) => {
-          const innderDim = x.shape[x.shape.length - 1]
-          const batch = tf.util.sizeFromShape(x.shape) / innderDim
-          const workgroupSize = [64, 1, 1]
-          const realPart = backend.runWebGPUProgram({
+    tf.registerKernel({
+    kernelName: 'FFT2',
+    backendName: 'webgpu',
+    kernelFunc: ({ backend, inputs: { input } }) => {
+        const innderDim = input.shape[input.shape.length - 1]
+        const batch = tf.util.sizeFromShape(input.shape) / innderDim
+        const workgroupSize = [64, 1, 1]
+        const reorderMap = new Array(innderDim).fill(0).map((_, i) => bitReverse(i, Math.log2(innderDim)))
+        const dispatchLayout = flatDispatchLayout([batch, innderDim * 2])
+        const dispatch = computeDispatch(dispatchLayout, [batch, innderDim * 2], workgroupSize)
+        let currentTensor = backend.runWebGPUProgram({
+            variableNames: ['X'],
+            outputShape: [batch, innderDim * 2],
             workgroupSize,
-            variableNames: ['value'],
-            outputShape: [batch, innderDim],
-            size: true,
-            dispatchLayout: flatDispatchLayout([batch, innderDim]),
-            dispatch: computeDispatch(flatDispatchLayout([batch, innderDim]), [batch, innderDim], workgroupSize),
+            shaderKey: `fft_permut_${innderDim}`,
+            dispatchLayout,
+            dispatch,
             getUserCode: () => `
-              fn main(index : i32) {
+              const reorderMap = array(${reorderMap.join(', ')});
+              fn main(index: i32) {
                 let coords = getOutputCoords();
                 let batch = coords[0];
-                let items = uniforms.realShape[1];
-                let multiplier = -2.0 * ${Math.PI} * f32(coords[1]) / f32(items);
-                var result = 0.0;
-                for (var i = 0; i < items; i++) {
-                  let x = multiplier * f32(i);
-                  result += getValue(batch, i) * cos(x);
+                let k = reorderMap[coords[1]];
+                if (coords[1] < ${innderDim}) {
+                    let k = reorderMap[coords[1]];
+                    let real = getX(batch, k);
+                    setOutputAtIndex(index, real);
+                } else {
+                    setOutputAtIndex(index, 0);
                 }
-                setOutputAtIndex(index, result);
               }`
-          }, [{ dataId: x.dataId, dtype: x.dtype, shape: [batch, innderDim]}], 'float32')
-          const res = tf.engine().runKernel('Reshape', { x: realPart }, { shape: x.shape })
-          backend.disposeData(realPart.dataId)
-          return res
+        }, [input], 'float32')
+        for (let len = 1; len < innderDim; len *= 2) {
+            let prevTensor = currentTensor
+            const uniformDataStep = [
+              {type: 'int32', data: [innderDim]},
+              {type: 'int32', data: [len]}
+            ];
+            let isLastStep = len*2 >= innderDim
+            currentTensor = backend.runWebGPUProgram({
+                variableNames: [`value`],
+                outputShape: [batch, isLastStep ? innderDim : innderDim * 2],
+                workgroupSize,
+                uniforms: 'innerDim : i32, len: i32,',
+                shaderKey: `fft_step`,
+                dispatchLayout: flatDispatchLayout([batch, innderDim * 2]),
+                dispatch: computeDispatch(flatDispatchLayout([batch, innderDim * 2]), [batch, innderDim * 2], workgroupSize),
+                getUserCode: () => `fn main(index: i32) {
+                    let coords = getOutputCoords();
+                    let batch = coords[0];
+                    let i = coords[1];
+                    let innerDim = uniforms.innerDim;
+                    let k = i % innerDim;
+                    let isHigh = (k % (uniforms.len * 2)) / uniforms.len;
+                    let isImag = i / innerDim;
+                    let isReal = 1 - isImag;
+                    let highSign = (1 - isHigh * 2);
+                    let baseIndex = k - isHigh * uniforms.len;
+                    let t = ${Math.PI} / f32(uniforms.len) * f32(k % uniforms.len);
+                    let a = cos(t);
+                    let b = sin(-t);
+                    let evenK_re = getValue(batch, baseIndex);
+                    let oddK_re = getValue(batch, baseIndex + uniforms.len);
+                    let evenK_im = getValue(batch, baseIndex + innerDim);
+                    let oddK_im = getValue(batch, baseIndex + uniforms.len + innerDim);
+                    let real = (evenK_re + (oddK_re * a - oddK_im * b) * f32(highSign));
+                    let imag = (evenK_im + (oddK_re * b + oddK_im * a) * f32(highSign));
+                    setOutputAtIndex(index, real * f32(isReal) + imag * f32(isImag));
+                    }`
+                }, [currentTensor], 'float32', uniformDataStep)
+            backend.disposeData(prevTensor.dataId)
         }
-      })
+        return currentTensor
+    }
+})
       function stft(signal, frameLength, frameStep, fftLength, windowFn) {
         const framedSignal = tf.signal.frame(signal, frameLength, frameStep)
         const input = tf.mul(framedSignal, windowFn(frameLength))
