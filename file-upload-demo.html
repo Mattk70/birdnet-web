@@ -59,11 +59,14 @@
         #progress {
             flex: 1;
         }
-        #birds {
+        #birdslist {
             padding-left: 1em;
         }
         #select_lang {
             font-size: 30px;
+        }
+        #turn-geofilter {
+            margin-left: 20px;
         }
     </style>
 </head>
@@ -85,6 +88,7 @@
     <option value="ja">🇯🇵</option>
     <option value="ru">🇷🇺</option>
 </select>
+<!-- <button id="turn-geofilter">Filter by Geolocation & date</button> -->
 </div>
 <div id="error"></div>
 <div id="log"></div>
@@ -97,12 +101,12 @@
 
     let showSettigns = false
     document.getElementById('settings_btn').onclick = () => {
-        document.getElementById('settings').style.display = showSettigns ? 'none' : 'block'
+        document.getElementById('settings').style.display = showSettigns ? 'none' : 'flex'
         showSettigns = !showSettigns
     }
     document.getElementById('select_lang').onchange = async (e) => {
         await setBirdLabels(birds, e.target.value)
-        document.querySelectorAll('#birds span').forEach(bird => {
+        document.querySelectorAll('#birdslist span').forEach(bird => {
             const index = Number(bird.attributes['data-id'].value)
             bird.innerText = birds[index].name
         })
@@ -171,7 +175,8 @@ async function setBirdLabels(birds, language) {
         language = supportedLanguages.find(l => l.startsWith(navigator.language)) || 'en_us'
         document.getElementById('select_lang').value = language
     }
-    const birdLabels = (await fetch(`models/birdnet/labels/${language}.txt`).then(r => r.text())).split('\n')
+    const birdLabels = (await fetch(`models/birdnet/labels/${language}.txt`).then(r => r.text()))
+        .split('\n').filter(x => x)
     if (!birds) {
         birds = new Array(birdLabels.length).fill(null).map(b => ({}))
     }
