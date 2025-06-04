@@ -4,4 +4,4 @@
 
 [Inference benchmark (webgpu)](https://georg95.github.io/birdnet-web/test-chirpity.html?backend=webgl&fast_fft=on)
 
-[WAV file inference demo](https://georg95.github.io/birdnet-web/file-upload-demo.html)
+[wav,ogg,mp3 file inference demo](https://georg95.github.io/birdnet-web/file-upload-demo.html)

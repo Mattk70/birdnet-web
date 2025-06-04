@@ -47,10 +47,15 @@
 
     const fileUpload = document.createElement('input')
     fileUpload.type = 'file'
-    fileUpload.accept = 'audio/wav'
-    fileUpload.onchange = processAudio
+    fileUpload.accept = 'audio/*'
+    fileUpload.onchange = (event) => processAudio(event).catch(e => {
+        document.getElementById('error').innerText = e.toString()
+        fileUpload.style.display = ''
+        document.querySelector('progress')?.remove()
+    })
     document.body.prepend(fileUpload)
     async function processAudio(event) {
+        document.getElementById('error').innerText = ''
         const file = event.target.files[0]
         if (!file) return
         fileUpload.style.display = 'none'
@@ -98,7 +103,7 @@
         fileUpload.style.display = ''
         log.innerHTML = `Inference time: ${timeSpent.toFixed(1)}s (x${audioLen / timeSpent | 0})<br />` + log.innerHTML
     }
-})()
+})().catch(e => document.getElementById('error').innerText = e.toString())
 
 async function initBirdPredictionModel() {
     await tf.setBackend('webgl')
@@ -130,6 +135,7 @@ async function initBirdPredictionModel() {
     progressText.innerText = 'Loading BirdNET model (60 Mb)...'
     const BirdNetJS = await loadModelPromise
     progressText.innerText = 'BirdNET warmup run...'
+    await new Promise(resolve => setTimeout(resolve, 100))
     tf.engine().startScope()
     await BirdNetJS.predict(tf.zeros([1, 144000]), { batchSize: 1 }).data()
     tf.engine().endScope()
