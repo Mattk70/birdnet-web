@@ -117,7 +117,11 @@ async function initBirdPredictionModel() {
         currentProgress += value
         progress.value = currentProgress
     }
-    const birdLabelsPromise = fetch('models/birdnet/labels/en_us.txt').then(r => r.text())
+    const supportedLanguages = ['af', 'da', 'en_us', 'fr', 'ja', 'no', 'ro', 'sl', 'tr', 'ar', 'de', 'es',
+        'hu', 'ko', 'pl', 'ru', 'sv', 'uk', 'cs', 'en_uk', 'fi', 'it', 'nl', 'pt', 'sk', 'th', 'zh']
+    const selectedLanguage = supportedLanguages.find(l => l.startsWith(navigator.language)) || 'en_us'
+
+    const birdLabelsPromise = fetch(`models/birdnet/labels/${selectedLanguage}.txt`).then(r => r.text())
     let prevLoadProgess = 0
     const loadModelPromise = tf.loadLayersModel('models/birdnet/model.json', {
         weightPathPrefix: 'models/birdnet/',
