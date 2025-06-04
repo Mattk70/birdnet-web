@@ -24,9 +24,8 @@
         body {
             padding: 20px;
         }
-        progress {
+        #progress_bar {
             width: 100%;
-            height: 50px;
             border-radius: 0;
             border: 1px solid;
         }
@@ -36,44 +35,102 @@
         #log, #error {
             margin: 20px 0;
         }
+        #settings_btn {
+            cursor: pointer;
+            font-size: 30px;
+            border: 0;
+            background: none;
+        }
+        #settings {
+            margin-top: 10px;
+        }
+        #progress, #settings, #audio_file {
+            display: none;
+            flex: 1;
+        }
+        #progress_bar, input[type="file"], #settings_btn {
+            height: 50px;
+            align-content: center;
+        }
+        #header {
+            display: flex;
+            justify-content: end;
+        }
+        #progress {
+            flex: 1;
+        }
+        #birds {
+            padding-left: 1em;
+        }
+        #select_lang {
+            font-size: 30px;
+        }
     </style>
 </head>
 <body>
+<header id="header">
+    <input type="file" id="audio_file" accept="audio/*"></input>
+    <div id="progress">
+        <progress id="progress_bar" value="0" max="100"></progress>
+        <span id="progress_text"></span>
+    </div>
+    <button id="settings_btn">⚙️</button>
+</header>
+<div id="settings">
+<select id="select_lang">
+    <option value="en_us">🇺🇸</option>
+    <option value="de">🇩🇪</option>
+    <option value="es">🇪🇸</option>
+    <option value="fr">🇫🇷</option>
+    <option value="ja">🇯🇵</option>
+    <option value="ru">🇷🇺</option>
+</select>
+</div>
 <div id="error"></div>
 <div id="log"></div>
+<ul id="birds">
+</ul>
 <script>
 (async function main() {
     const { birds, BirdNetJS } = await initBirdPredictionModel()
+    document.getElementById('audio_file').style.display = 'block'
 
-    const fileUpload = document.createElement('input')
-    fileUpload.type = 'file'
-    fileUpload.accept = 'audio/*'
-    fileUpload.onchange = (event) => processAudio(event).catch(e => {
-        document.getElementById('error').innerText = e.toString()
-        fileUpload.style.display = ''
-        document.querySelector('progress')?.remove()
+    let showSettigns = false
+    document.getElementById('settings_btn').onclick = () => {
+        document.getElementById('settings').style.display = showSettigns ? 'none' : 'block'
+        showSettigns = !showSettigns
+    }
+    document.getElementById('select_lang').onchange = async (e) => {
+        await setBirdLabels(birds, e.target.value)
+        document.querySelectorAll('#birds span').forEach(bird => {
+            const index = Number(bird.attributes['data-id'].value)
+            bird.innerText = birds[index].name
+        })
+    }
+
+    
+    document.getElementById('audio_file').onchange = (event) => processAudio(event).catch(e => {
+        document.getElementById('error').innerText = e.stack || e.message
+        document.getElementById('audio_file').style.display = 'block'
+        document.getElementById('progress').style.display = 'none'
     })
-    document.body.prepend(fileUpload)
     async function processAudio(event) {
-        document.getElementById('error').innerText = ''
         const file = event.target.files[0]
         if (!file) return
-        fileUpload.style.display = 'none'
-        const log = document.getElementById('log')
+        document.getElementById('error').innerHTML = ''
+        document.getElementById('birds').innerHTML = ''
+        document.getElementById('log').innerHTML = ''
+        document.getElementById('audio_file').style.display = 'none'
+        document.getElementById('progress').style.display = 'block'
+        document.getElementById('progress_bar').value = 0
         let start = performance.now()
         const arrayBuffer = await file.arrayBuffer()
         const tempCtx = new AudioContext({ sampleRate: 48000 })
         const originalBuffer = await tempCtx.decodeAudioData(arrayBuffer)
         const pcm48k = new Float32Array(originalBuffer.getChannelData(0))
         tempCtx.close()
-
-        const progress = document.createElement('progress')
-        document.body.prepend(progress)
-        progress.max = 100
-        progress.value = 0
-
         const audioLen = pcm48k.length / 48000
-        log.innerHTML = `${audioLen | 0}s audio, decoded in ${((performance.now() - start) / 1000).toFixed(1)}s. Inferece...<br /><br />`
+        document.getElementById('log').innerHTML = `${audioLen | 0}s audio, decoded in ${((performance.now() - start) / 1000).toFixed(1)}s. Inference...<br />`
         start = performance.now()
         const chunk3s = 48000 * 3
         const batchSize = 8
@@ -87,65 +144,70 @@
             const audioChunk3000ms = tf.tensor(audioBuf, [batchSize, chunk3s])
             const prediction = await BirdNetJS.predict(audioChunk3000ms).data()
             audioChunk3000ms.dispose()
-            progress.value = k / pcm48k.length * 100 | 0
+            document.getElementById('progress_bar').value = k / pcm48k.length * 100 | 0
             for (let j = 0; j < prediction.length; j++) {
                 if (prediction[j] > 0.3) {
                     const curChunk = j / 6522 | 0
                     const seconds = (k + curChunk * chunk3s) / 48000 % 60
                     const minutes = (k + curChunk * chunk3s) / 48000 / 60 | 0
                     const time = `${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`
-                    log.innerHTML += `${time} - ${birds[j % 6522].name} (${prediction[j].toFixed(2)})<br />`
+                    const birdElem = document.createElement('li')
+                    birdElem.innerHTML = `${time} - <span data-id="${j % 6522}">${birds[j % 6522].name}</span> (${prediction[j].toFixed(2)})`
+                    document.getElementById('birds').appendChild(birdElem)
                 }
             }
         }
         const timeSpent = (performance.now() - start) / 1000
-        progress.remove()
-        fileUpload.style.display = ''
-        log.innerHTML = `Inference time: ${timeSpent.toFixed(1)}s (x${audioLen / timeSpent | 0})<br />` + log.innerHTML
+        document.getElementById('progress').style.display = 'none'
+        document.getElementById('audio_file').style.display = 'block'
+        document.getElementById('log').innerHTML += `Inference time: ${timeSpent.toFixed(1)}s (x${audioLen / timeSpent | 0})<br />`
     }
-})().catch(e => document.getElementById('error').innerText = e.toString())
+})().catch(e => document.getElementById('error').innerText = e.stack || e.message)
 
+async function setBirdLabels(birds, language) {
+    if (!language) {
+        const supportedLanguages = ['af', 'da', 'en_us', 'fr', 'ja', 'no', 'ro', 'sl', 'tr', 'ar', 'de', 'es',
+        'hu', 'ko', 'pl', 'ru', 'sv', 'uk', 'cs', 'en_uk', 'fi', 'it', 'nl', 'pt', 'sk', 'th', 'zh']
+        language = supportedLanguages.find(l => l.startsWith(navigator.language)) || 'en_us'
+        document.getElementById('select_lang').value = language
+    }
+    const birdLabels = (await fetch(`models/birdnet/labels/${language}.txt`).then(r => r.text())).split('\n')
+    if (!birds) {
+        birds = new Array(birdLabels.length).fill(null).map(b => ({}))
+    }
+    for (let i = 0; i < birdLabels.length; i++) {
+        birds[i].name = birdLabels[i].split('_')[1]
+    }
+    return birds
+}
 async function initBirdPredictionModel() {
     await tf.setBackend('webgl')
-    const progress = document.createElement('progress')
-    const progressText = document.createElement('span')
-    document.body.prepend(progress, progressText)
-    progress.max = 100
-    progress.value = 0
+    document.getElementById('progress').style.display = 'block'
+    document.getElementById('progress').max = 100
+    document.getElementById('progress').value = 0
     let currentProgress = 0
     function addProgress(value) {
         currentProgress += value
-        progress.value = currentProgress
+        document.getElementById('progress_bar').value = currentProgress
     }
-    const supportedLanguages = ['af', 'da', 'en_us', 'fr', 'ja', 'no', 'ro', 'sl', 'tr', 'ar', 'de', 'es',
-        'hu', 'ko', 'pl', 'ru', 'sv', 'uk', 'cs', 'en_uk', 'fi', 'it', 'nl', 'pt', 'sk', 'th', 'zh']
-    const selectedLanguage = supportedLanguages.find(l => l.startsWith(navigator.language)) || 'en_us'
-
-    const birdLabelsPromise = fetch(`models/birdnet/labels/${selectedLanguage}.txt`).then(r => r.text())
     let prevLoadProgess = 0
     const loadModelPromise = tf.loadLayersModel('models/birdnet/model.json', {
         weightPathPrefix: 'models/birdnet/',
         onProgress: (p) => { addProgress((p - prevLoadProgess) * 60); prevLoadProgess = p }
     })
-    progressText.innerText = 'Loading bird labels...'
-    const birdLabels = (await birdLabelsPromise).split('\n')
-    const birds = new Array(birdLabels.length)
-    for (let i = 0; i < birdLabels.length; i++) {
-        birds[i] = {
-            name: birdLabels[i].split('_')[1]
-        }
-    }
+    document.getElementById('progress_text').innerText = 'Loading bird labels...'
+    const birds = await setBirdLabels()
     addProgress(20)
-    progressText.innerText = 'Loading BirdNET model (60 Mb)...'
+    document.getElementById('progress_text').innerText = 'Loading BirdNET model (60 Mb)...'
     const BirdNetJS = await loadModelPromise
-    progressText.innerText = 'BirdNET warmup run...'
+    document.getElementById('progress_text').innerText = 'BirdNET warmup run...'
     await new Promise(resolve => setTimeout(resolve, 100))
     tf.engine().startScope()
     await BirdNetJS.predict(tf.zeros([1, 144000]), { batchSize: 1 }).data()
     tf.engine().endScope()
 
-    document.body.removeChild(progressText)
-    document.body.removeChild(progress)
+    document.getElementById('progress_text').style.display = 'none'
+    document.getElementById('progress').style.display = 'none'
     return { birds, BirdNetJS }
 }
 </script>
