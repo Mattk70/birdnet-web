@@ -1,0 +1,143 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@latest"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-backend-webgpu/dist/tf-backend-webgpu.js"></script>
+    <script src="birdnet.js"></script>
+    <title>BirdNET demo</title>
+    <style>
+        html, body {
+            height: 100%;
+            width: 100%;
+            box-sizing: border-box;
+            background-color: #222;
+            font-size: 15px;
+            font-family: 'Courier New', Courier, monospace;
+            margin: 0;
+            color: bisque;
+        }
+        html {
+            padding: 0;
+        }
+        body {
+            padding: 20px;
+        }
+        progress {
+            width: 100%;
+            height: 50px;
+            border-radius: 0;
+            border: 1px solid;
+        }
+        #error {
+            color: rgb(224, 99, 99);
+        }
+        #log, #error {
+            margin: 20px 0;
+        }
+    </style>
+</head>
+<body>
+<div id="error"></div>
+<div id="log"></div>
+<script>
+(async function main() {
+    const { birds, BirdNetJS } = await initBirdPredictionModel()
+
+    const fileUpload = document.createElement('input')
+    fileUpload.type = 'file'
+    fileUpload.accept = 'audio/wav'
+    fileUpload.onchange = processAudio
+    document.body.prepend(fileUpload)
+    async function processAudio(event) {
+        const file = event.target.files[0]
+        if (!file) return
+        fileUpload.style.display = 'none'
+        const log = document.getElementById('log')
+        let start = performance.now()
+        const arrayBuffer = await file.arrayBuffer()
+        const tempCtx = new AudioContext({ sampleRate: 48000 })
+        const originalBuffer = await tempCtx.decodeAudioData(arrayBuffer)
+        const pcm48k = new Float32Array(originalBuffer.getChannelData(0))
+        tempCtx.close()
+
+        const progress = document.createElement('progress')
+        document.body.prepend(progress)
+        progress.max = 100
+        progress.value = 0
+
+        const audioLen = pcm48k.length / 48000
+        log.innerHTML = `${audioLen | 0}s audio, decoded in ${((performance.now() - start) / 1000).toFixed(1)}s. Inferece...<br /><br />`
+        start = performance.now()
+        const chunk3s = 48000 * 3
+        const batchSize = 8
+        for (let k = 0; k < pcm48k.length; k += chunk3s * batchSize) {
+            let audioBuf = pcm48k.slice(k, k + chunk3s * batchSize)
+            if (audioBuf.length < chunk3s * batchSize) {
+                let extBuf = new Float32Array(chunk3s * batchSize)
+                extBuf.set(audioBuf, 0)
+                audioBuf = extBuf
+            }
+            const audioChunk3000ms = tf.tensor(audioBuf, [batchSize, chunk3s])
+            const prediction = await BirdNetJS.predict(audioChunk3000ms).data()
+            audioChunk3000ms.dispose()
+            progress.value = k / pcm48k.length * 100 | 0
+            for (let j = 0; j < prediction.length; j++) {
+                if (prediction[j] > 0.3) {
+                    const curChunk = j / 6522 | 0
+                    const seconds = (k + curChunk * chunk3s) / 48000 % 60
+                    const minutes = (k + curChunk * chunk3s) / 48000 / 60 | 0
+                    const time = `${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`
+                    log.innerHTML += `${time} - ${birds[j % 6522].name} (${prediction[j].toFixed(2)})<br />`
+                }
+            }
+        }
+        const timeSpent = (performance.now() - start) / 1000
+        progress.remove()
+        fileUpload.style.display = ''
+        log.innerHTML = `Inference time: ${timeSpent.toFixed(1)}s (x${audioLen / timeSpent | 0})<br />` + log.innerHTML
+    }
+})()
+
+async function initBirdPredictionModel() {
+    await tf.setBackend('webgl')
+    const progress = document.createElement('progress')
+    const progressText = document.createElement('span')
+    document.body.prepend(progress, progressText)
+    progress.max = 100
+    progress.value = 0
+    let currentProgress = 0
+    function addProgress(value) {
+        currentProgress += value
+        progress.value = currentProgress
+    }
+    const birdLabelsPromise = fetch('models/birdnet/labels/en_us.txt').then(r => r.text())
+    let prevLoadProgess = 0
+    const loadModelPromise = tf.loadLayersModel('models/birdnet/model.json', {
+        weightPathPrefix: 'models/birdnet/',
+        onProgress: (p) => { addProgress((p - prevLoadProgess) * 60); prevLoadProgess = p }
+    })
+    progressText.innerText = 'Loading bird labels...'
+    const birdLabels = (await birdLabelsPromise).split('\n')
+    const birds = new Array(birdLabels.length)
+    for (let i = 0; i < birdLabels.length; i++) {
+        birds[i] = {
+            name: birdLabels[i].split('_')[1]
+        }
+    }
+    addProgress(20)
+    progressText.innerText = 'Loading BirdNET model (60 Mb)...'
+    const BirdNetJS = await loadModelPromise
+    progressText.innerText = 'BirdNET warmup run...'
+    tf.engine().startScope()
+    await BirdNetJS.predict(tf.zeros([1, 144000]), { batchSize: 1 }).data()
+    tf.engine().endScope()
+
+    document.body.removeChild(progressText)
+    document.body.removeChild(progress)
+    return { birds, BirdNetJS }
+}
+</script>
+</body>
+</html>
