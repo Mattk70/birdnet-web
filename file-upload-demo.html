@@ -5,6 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@latest"></script>
     <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-backend-webgpu/dist/tf-backend-webgpu.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-tflite/dist/tf-tflite.min.js"></script>
     <script src="birdnet.js"></script>
     <title>BirdNET demo</title>
     <style>
@@ -35,15 +36,6 @@
         #log, #error {
             margin: 20px 0;
         }
-        #settings_btn {
-            cursor: pointer;
-            font-size: 30px;
-            border: 0;
-            background: none;
-        }
-        #settings {
-            margin-top: 10px;
-        }
         #progress, #settings, #audio_file {
             display: none;
             flex: 1;
@@ -62,11 +54,49 @@
         #birdslist {
             padding-left: 1em;
         }
+
+        #settings_btn {
+            cursor: pointer;
+            font-size: 30px;
+            border: 0;
+            background: none;
+        }
+        #settings {
+            width: 100%;
+            margin-top: 15px;
+            width: fit-content;
+            flex-direction: column;
+        }
         #select_lang {
             font-size: 30px;
+            width: fit-content;
         }
-        #turn-geofilter {
-            margin-left: 20px;
+        #areafilter-loader {
+            margin-top: 15px;
+        }
+        .loader {
+            display: none;
+            width: 36px;
+            height: 36px;
+            border: 5px solid #FFF;
+            border-bottom-color: transparent;
+            border-radius: 50%;
+            box-sizing: border-box;
+            animation: rotation 1s linear infinite;
+        }
+        @keyframes rotation {
+            0% {
+                transform: rotate(0deg);
+            }
+            100% {
+                transform: rotate(360deg);
+            }
+        }
+        .confidence-label {
+            margin-top: 15px;
+        }
+        #audio-confidence, #area-confidence {
+            margin-top: 5px;
         }
     </style>
 </head>
@@ -80,16 +110,25 @@
     <button id="settings_btn">⚙️</button>
 </header>
 <div id="settings">
-<select id="select_lang">
-    <option value="en_us">🇺🇸</option>
-    <option value="de">🇩🇪</option>
-    <option value="es">🇪🇸</option>
-    <option value="fr">🇫🇷</option>
-    <option value="ja">🇯🇵</option>
-    <option value="ru">🇷🇺</option>
-</select>
-<!-- <button id="turn-geofilter">Filter by Geolocation & date</button> -->
+    <select id="select_lang">
+        <option value="en_us">🇺🇸</option>
+        <option value="de">🇩🇪</option>
+        <option value="es">🇪🇸</option>
+        <option value="fr">🇫🇷</option>
+        <option value="ja">🇯🇵</option>
+        <option value="ru">🇷🇺</option>
+    </select>
+    <label class="confidence-label" for="audio-confidence">
+        Audio detection confidence: <span id="audio-confidence-num">0.3</span>
+    </label>
+    <input id="audio-confidence" type="range" name="audio-confidence" value="3" min="1" max="10" />
+    <label class="confidence-label" for="area-confidence">
+        Area detection confidence: <span id="area-confidence-num">0</span>
+    </label>
+    <input id="area-confidence" type="range" name="area-confidence" value="0" min="0" max="10" />
+    <span class="loader" id="areafilter-loader"></span>
 </div>
+
 <div id="error"></div>
 <div id="log"></div>
 <ul id="birdslist">
@@ -97,22 +136,12 @@
 <script>
 (async function main() {
     const { birds, BirdNetJS } = await initBirdPredictionModel()
+    const MIN_AUDIO_CONFIDENCE = 0.1
+    const MIN_AREA_CONFIDENCE = 0.0
+    let AUDIO_CONFIDENCE = 0.3
+    let AREA_THRESHOLD = 0.1
+
     document.getElementById('audio_file').style.display = 'block'
-
-    let showSettigns = false
-    document.getElementById('settings_btn').onclick = () => {
-        document.getElementById('settings').style.display = showSettigns ? 'none' : 'flex'
-        showSettigns = !showSettigns
-    }
-    document.getElementById('select_lang').onchange = async (e) => {
-        await setBirdLabels(birds, e.target.value)
-        document.querySelectorAll('#birdslist span').forEach(bird => {
-            const index = Number(bird.attributes['data-id'].value)
-            bird.innerText = birds[index].name
-        })
-    }
-
-    
     document.getElementById('audio_file').onchange = (event) => processAudio(event).catch(e => {
         document.getElementById('error').innerText = e.stack || e.message
         document.getElementById('audio_file').style.display = 'block'
@@ -149,22 +178,64 @@
             const prediction = await BirdNetJS.predict(audioChunk3000ms).data()
             audioChunk3000ms.dispose()
             document.getElementById('progress_bar').value = k / pcm48k.length * 100 | 0
+            const birdElems = []
             for (let j = 0; j < prediction.length; j++) {
-                if (prediction[j] > 0.3) {
+                const audioConfidence = prediction[j]
+                const areaConfidence = (birds[j % 6522].areaScore || 1)
+                if (audioConfidence > MIN_AUDIO_CONFIDENCE && areaConfidence > MIN_AREA_CONFIDENCE) {
                     const curChunk = j / 6522 | 0
                     const seconds = (k + curChunk * chunk3s) / 48000 % 60
                     const minutes = (k + curChunk * chunk3s) / 48000 / 60 | 0
                     const time = `${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`
                     const birdElem = document.createElement('li')
-                    birdElem.innerHTML = `${time} - <span data-id="${j % 6522}">${birds[j % 6522].name}</span> (${prediction[j].toFixed(2)})`
-                    document.getElementById('birdslist').appendChild(birdElem)
+                    const visible = prediction[j] > AUDIO_CONFIDENCE && areaConfidence > AREA_THRESHOLD
+                    birdElem.style.display = visible ? '' : 'none'
+                    birdElem.innerHTML = `${time} - <span data-id="${j % 6522}" data-confidence="${prediction[j]}">${birds[j % 6522].name}</span> (${prediction[j].toFixed(2)})`
+                    birdElems.push(birdElem)
                 }
             }
+            document.getElementById('birdslist').append(...birdElems)
         }
         const timeSpent = (performance.now() - start) / 1000
         document.getElementById('progress').style.display = 'none'
         document.getElementById('audio_file').style.display = 'block'
         document.getElementById('log').innerHTML += `Inference time: ${timeSpent.toFixed(1)}s (x${audioLen / timeSpent | 0})<br />`
+    }
+
+    let showSettigns = false
+    document.getElementById('settings_btn').onclick = () => {
+        document.getElementById('settings').style.display = showSettigns ? 'none' : 'flex'
+        showSettigns = !showSettigns
+    }
+    document.getElementById('select_lang').onchange = async (e) => {
+        await setBirdLabels(birds, e.target.value)
+        updateBirds()
+    }
+    document.getElementById('audio-confidence').onchange = async (e) => {
+        AUDIO_CONFIDENCE = e.target.value / 10
+        document.getElementById('audio-confidence-num').innerText = AUDIO_CONFIDENCE.toFixed(2)
+        updateBirds()
+    }
+    document.getElementById('area-confidence').onchange = async (e) => {
+        if (birds[0].areaScore === undefined) {
+            await loadBirdsAreaData(birds).catch(e => {
+                document.getElementById('error').innerText = e.stack || e.message
+                document.getElementById('areafilter-loader').style.display = 'none'
+                document.getElementById('area-confidence').disabled = false
+            })
+        }
+        AREA_THRESHOLD = e.target.value / 10
+        document.getElementById('area-confidence-num').innerText = AREA_THRESHOLD.toFixed(2)
+        updateBirds()
+    }
+    function updateBirds() {
+        document.querySelectorAll('#birdslist span').forEach(bird => {
+            const index = Number(bird.attributes['data-id'].value)
+            const confidence = Number(bird.attributes['data-confidence'].value)
+            const areaScore = birds[index].areaScore || 1
+            bird.innerText = birds[index].name
+            bird.parentNode.style.display = areaScore > AREA_THRESHOLD && confidence > AUDIO_CONFIDENCE ? '' : 'none'
+        })
     }
 })().catch(e => document.getElementById('error').innerText = e.stack || e.message)
 
@@ -184,6 +255,29 @@ async function setBirdLabels(birds, language) {
         birds[i].name = birdLabels[i].split('_')[1]
     }
     return birds
+}
+async function loadBirdsAreaData(birds) {
+    await tf.setBackend('webgl')
+    document.getElementById('area-confidence').disabled = true
+    document.getElementById('areafilter-loader').style.display = 'inline'
+    async function getCoords() {
+        return new Promise((resolve, reject) => {
+            navigator.geolocation.getCurrentPosition(({ coords }) => resolve(coords), reject, { enableHighAccuracy: false })
+        })
+    }
+    const startOfYear = new Date(new Date().getFullYear(), 0, 1);
+    startOfYear.setDate(startOfYear.getDate() + (1 - (startOfYear.getDay() % 7)))
+
+    const week = Math.round((new Date() - startOfYear) / 604800000) + 1
+    const { latitude, longitude } = await getCoords()
+    
+    const areaModel = await tflite.loadTFLiteModel('models/birdnet/area-model.tflite')
+    const areaScores = await areaModel.predict(tf.tensor([[latitude, longitude, week]])).data()
+    for (let i = 0; i < areaScores.length; i++) {
+        birds[i].areaScore = areaScores[i]
+    }
+    document.getElementById('area-confidence').disabled = false
+    document.getElementById('areafilter-loader').style.display = 'none'
 }
 async function initBirdPredictionModel() {
     await tf.setBackend('webgl')
