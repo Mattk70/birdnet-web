@@ -18,33 +18,70 @@ class MelSpecLayerSimple extends tf.layers.Layer {
     }
     computeOutputShape(inputShape) {
         return [inputShape[0], this.specShape[0], this.specShape[1], 1];
+
     }
-    call(inputs) {
+
+    normalise_audio_batch = (tensor) => {
         return tf.tidy(() => {
-        inputs = inputs[0]
-        return tf.stack(inputs.split(inputs.shape[0]).map((input) => {
-                let spec = input.squeeze()
-                spec = tf.sub(spec, tf.min(spec, -1, true))
-                spec = tf.div(spec, tf.max(spec, -1, true).add(0.000001))
-                spec = tf.sub(spec, 0.5)
-                spec = tf.mul(spec, 2.0)
-                if (window.useFastFFT === false) {
-                    spec = tf.signal.stft(spec, this.frameLength, this.frameStep, this.frameLength, tf.signal.hannWindow)
-                    spec = tf.cast(spec, 'float32')
-                } else {
-                    spec = stft(spec, this.frameLength, this.frameStep, this.frameLength, tf.signal.hannWindow)
-                }
-                spec = tf.matMul(spec, this.melFilterbank)
-                spec = spec.pow(2.0)
-                spec = spec.pow(tf.div(1.0, tf.add(1.0, tf.exp(this.magScale.read()))))
-                spec = tf.reverse(spec, -1)
-                spec = tf.transpose(spec)
-                spec = spec.expandDims(-1)
-                // spec = spec.expandDims(0)
-                return spec;
-            }))
-        })
-    }
+            const sigMax = tf.max(tensor, 1, true);
+            const sigMin = tf.min(tensor, 1, true);
+            const range = sigMax.sub(sigMin);
+
+            const two = tf.scalar(2);
+            const one = tf.scalar(1);
+
+            const normalized = tensor
+            .sub(sigMin)
+            .divNoNan(range)
+            .mul(two)
+            .sub(one);
+
+            return normalized;
+        });
+    };
+    call(inputs) {
+    return tf.tidy(() => {
+      // inputs is a tensor representing the input data
+      inputs = inputs[0];
+      let result;
+      if (BACKEND === 'blah') {
+        result = tf.stack(
+          inputs.split(inputs.shape[0]).map((input) => {
+            input = input.squeeze();
+            
+            // Normalize values between -1 and 1
+            input = this.normalise_audio_batch(input);
+            // Perform STFT and cast result to float
+            return tf.signal.stft(
+              input,
+              this.frameLength,
+              this.frameStep,
+              this.frameLength,
+              tf.signal.hannWindow
+            ).cast("float32");
+          })
+        )
+      } else {
+        // Normalise batch
+        inputs = this.normalise_audio_batch(inputs);
+        //Custom optimized and batch-capable stft
+        result = stft(
+          inputs,
+          this.frameLength,
+          this.frameStep,
+          this.frameLength,
+          tf.signal.hannWindow
+        )
+      }
+      return result
+        .matMul(this.melFilterbank)
+        .pow(2.0)
+        .pow(tf.div(1.0, tf.add(1.0, tf.exp(this.magScale.read()))))
+        .reverse(-1)
+        .transpose([0, 2, 1])
+        .expandDims(-1);
+    });
+  }
     static get className() { return 'MelSpecLayerSimple' }
 }
 tf.serialization.registerClass(MelSpecLayerSimple)
@@ -144,25 +181,29 @@ void main() {
     }
 })
 tf.registerKernel({
-    kernelName: 'FRAME',
-    backendName: 'webgl',
-    kernelFunc: ({ backend, inputs: { input, frameLength, frameStep } }) => {
-        const outpLen = (input.size - frameLength + frameStep) / frameStep | 0
-        
-        return backend.runWebGLProgram({
-            variableNames: ['x'],
-            outputShape: [outpLen, frameLength],
-            userCode: `
-    void main() {
-    ivec2 coords = getOutputCoords();
-    int j = coords[1];
-    int b = coords[0];
-    int i = b * ${frameLength} + j;
-    setOutput(getX((i / ${frameLength}) * ${frameStep} + i % ${frameLength}));
-    }`
-        }, [input], 'float32')
-    }
-})
+  kernelName: "FRAME",
+  backendName: "webgl",
+  kernelFunc: ({ inputs: { input, frameLength, frameStep }, backend }) => {
+    const [batchSize, signalLength] = input.shape;
+    const outputLength = (signalLength - frameLength + frameStep) / frameStep | 0;
+    const outputShape = [batchSize, outputLength, frameLength];
+    const userCode = `void main() {
+        ivec3 coords = getOutputCoords(); // [batch, frame, sample]
+        int b = coords.x;
+        int f = coords.y;
+        int l = coords.z;
+
+        int signalIndex = f * ${frameStep} + l;
+        float value = getX(b, signalIndex);
+        setOutput(value);
+      }`;
+    return backend.compileAndRun({
+        variableNames: ["x"],
+        outputShape,
+        userCode,
+      }, [input]);
+  },
+});
 function arrayProduct (arr) {
     let product = 1;
     for (let i = 0; i < arr.length; i++) { product *= arr[i] }
@@ -271,23 +312,35 @@ fn main(index: i32) {
     }
 })
 tf.registerKernel({
-    kernelName: 'FRAME',
-    backendName: 'webgpu',
-    kernelFunc: ({ backend, inputs: { input, frameLength, frameStep } }) => {
-        const workgroupSize = [64, 1, 1]
-        const outpLen = (input.size - frameLength + frameStep) / frameStep | 0
-        const dispatchLayout = flatDispatchLayout([outpLen, frameLength])
-        return backend.runWebGPUProgram({
-            variableNames: ['x'],
-            outputShape: [outpLen, frameLength],
-            workgroupSize,
-            shaderKey: `frame_${frameLength}_${frameStep}`,
-            dispatchLayout,
-            dispatch: computeDispatch(dispatchLayout, [outpLen, frameLength], workgroupSize),
-            getUserCode: () => `
-    fn main(i: i32) {
-        setOutputAtIndex(i, getX((i / ${frameLength}) * ${frameStep} + i % ${frameLength}));
-    }`
-        }, [input], 'float32')
-    }
-})
+  kernelName: "FRAME",
+  backendName: "webgpu",
+  kernelFunc: ({ backend, inputs: { input, frameLength, frameStep } }) => {
+    const [batchSize, signalLength] = input.shape;
+    const outputLength = (signalLength - frameLength + frameStep) / frameStep | 0;
+    const outputShape = [batchSize, outputLength, frameLength];
+    const workgroupSize = [64, 1, 1]; // tune as needed
+    const dispatchLayout = flatDispatchLayout(outputShape);
+    const dispatch = computeDispatch(dispatchLayout, outputShape, workgroupSize);
+    return backend.runWebGPUProgram(
+      {
+        variableNames: ["x"],
+        outputShape,
+        workgroupSize,
+        dispatchLayout,
+        dispatch,
+        shaderKey: `frame_batched_${frameLength}_${frameStep}`,
+        getUserCode: () => `
+          fn main( index: i32) {
+            let globalId = getOutputCoords();
+            let b = i32(globalId.x);  // batch index
+            let f = i32(globalId.y);  // frame index
+            let l = i32(globalId.z);  // position within frame
+
+            let signalIndex = f * ${frameStep} + l;
+
+            // Get the value from input[b, signalIndex]
+            setOutputAtCoords(b, f, l, getX(b, signalIndex));
+          }`
+      }, [input], "float32");
+  },
+});
