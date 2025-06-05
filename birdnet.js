@@ -44,6 +44,7 @@ class MelSpecLayerSimple extends tf.layers.Layer {
       // inputs is a tensor representing the input data
       inputs = inputs[0];
       let result;
+      const BACKEND = tf.getBackend();
       if (BACKEND === 'blah') {
         result = tf.stack(
           inputs.split(inputs.shape[0]).map((input) => {
