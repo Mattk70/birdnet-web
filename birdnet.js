@@ -74,7 +74,7 @@ class MelSpecLayerSimple extends tf.layers.Layer {
         )
       }
       return result
-        .matMul(this.melFilterbank)
+        .matMul(this.melFilterbank) 
         .pow(2.0)
         .pow(tf.div(1.0, tf.add(1.0, tf.exp(this.magScale.read()))))
         .reverse(-1)
