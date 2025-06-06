@@ -125,7 +125,7 @@
     <label class="confidence-label" for="area-confidence">
         Area detection confidence: <span id="area-confidence-num">0</span>
     </label>
-    <input id="area-confidence" type="range" name="area-confidence" value="0" min="0" max="10" />
+    <input id="area-confidence" type="range" name="area-confidence" value="0" min="0" max="1" step="0.01" />
     <span class="loader" id="areafilter-loader"></span>
 </div>
 
@@ -224,7 +224,7 @@
                 document.getElementById('area-confidence').disabled = false
             })
         }
-        AREA_THRESHOLD = e.target.value / 10
+        AREA_THRESHOLD = e.target.value 
         document.getElementById('area-confidence-num').innerText = AREA_THRESHOLD.toFixed(2)
         updateBirds()
     }
