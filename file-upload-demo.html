@@ -166,7 +166,7 @@
         document.getElementById('log').innerHTML = `${audioLen | 0}s audio, decoded in ${((performance.now() - start) / 1000).toFixed(1)}s. Inference...<br />`
         start = performance.now()
         const chunk3s = 48000 * 3
-        const batchSize = 32
+        const batchSize = 16
         for (let k = 0; k < pcm48k.length; k += chunk3s * batchSize) {
             let audioBuf = pcm48k.slice(k, k + chunk3s * batchSize)
             if (audioBuf.length < chunk3s * batchSize) {
